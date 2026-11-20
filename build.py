@@ -490,6 +490,10 @@ def split_questions(questions: list[dict], rng: random.Random) -> list[dict]:
 
 
 # ----------------------------------------------------------------------------- PDF slice
+MAX_KEY_LEN = 40
+MAX_CELL_CHARS = 600
+
+
 def _table_rows(content: str) -> list[list[str]]:
     rows = [
         [c.strip() for c in ln.strip("| ").split("|")]
@@ -508,8 +512,14 @@ def _table_rows(content: str) -> list[list[str]]:
             for ln in content.splitlines()
             if ":" in ln
             for a, b in [ln.split(":", 1)]
+            if len(a.strip()) <= MAX_KEY_LEN
         ]
     return [r for r in rows if any(r)][:25]
+
+
+def _usable_table(rows: list[list[str]]) -> bool:
+    """At least 3 rows and no cell too tall for a PDF page (reportlab cannot split a cell)."""
+    return len(rows) >= 3 and max(len(c) for r in rows for c in r) <= MAX_CELL_CHARS
 
 
 def render_pdfs(corpus: list[dict], out_dir: Path, rng: random.Random) -> list[dict]:
@@ -520,6 +530,7 @@ def render_pdfs(corpus: list[dict], out_dir: Path, rng: random.Random) -> list[d
     from reportlab.lib.utils import ImageReader
     from reportlab.pdfgen import canvas
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
+    from reportlab.platypus.doctemplate import LayoutError
 
     drive = sorted(
         (
@@ -532,7 +543,7 @@ def render_pdfs(corpus: list[dict], out_dir: Path, rng: random.Random) -> list[d
     if not drive:
         return []
     rng.shuffle(drive)
-    with_tables = [d for d in drive if len(_table_rows(d["content"])) >= 3]
+    with_tables = [d for d in drive if _usable_table(_table_rows(d["content"]))]
     picked_tables = with_tables[: PDF_SLICE["tables"]]
     remaining = [d for d in drive if d not in picked_tables]
     scanned = remaining[: PDF_SLICE["scanned"]]
@@ -544,6 +555,12 @@ def render_pdfs(corpus: list[dict], out_dir: Path, rng: random.Random) -> list[d
 
     def esc(s: str) -> str:
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _text_story(content: str) -> list:
+        return [
+            Paragraph(esc(para) or "&nbsp;", styles["BodyText"])
+            for para in content.split("\n")
+        ]
 
     for kind, docs in (
         ("tables", picked_tables),
@@ -605,11 +622,18 @@ def render_pdfs(corpus: list[dict], out_dir: Path, rng: random.Random) -> list[d
                     )
                     story.append(tbl)
                 else:
-                    for para in d["content"].split("\n"):
-                        story.append(
-                            Paragraph(esc(para) or "&nbsp;", styles["BodyText"])
-                        )
-                doc.build(story)
+                    story.extend(_text_story(d["content"]))
+                try:
+                    doc.build(story)
+                except LayoutError:
+                    # Defensive: never let one odd document break the release build.
+                    doc = SimpleDocTemplate(
+                        str(path), pagesize=letter, invariant=1, title=d["title"][:80]
+                    )
+                    doc.build(
+                        [Paragraph(esc(d["title"]), styles["Title"])]
+                        + _text_story(d["content"])
+                    )
             manifest.append({"doc_id": d["doc_id"], "file": path.name, "kind": kind})
     return manifest
 
