@@ -1,0 +1,7 @@
+# Used to clone 500 Confluence/Drive documents into the `subsidiary` tenant.
+# Fill `company` and `products` after reading a few documents (the build prints the
+# most frequent capitalised names to help). People are renamed automatically.
+company: []        # e.g. ["Acme Inference", "Acme"]  (longest first)
+products: []       # e.g. ["AcmeServe"]
+company_replacement: "Northwind Labs"
+product_replacements: ["NorthServe", "NorthStack", "NorthGraph", "NorthQueue", "NorthEdge"]
