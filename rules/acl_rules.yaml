@@ -1,0 +1,50 @@
+# Derived document permissions. build.py applies these per source_type.
+# modes:
+#   tenant      every user of the document's tenant
+#   roles       only the listed roles
+#   principals  only users whose email appears in the document header (Gmail)
+#   keyword     first matching rule on title + head of content decides; else `default`
+# `exec` additionally sees everything except the source types in exec_sees_all_except.
+exec_sees_all_except: [gmail]
+head_chars: 1500
+sources:
+  gmail:
+    mode: principals
+  hubspot:
+    mode: roles
+    roles: [sales]
+  github:
+    mode: roles
+    roles: [engineering]
+  jira:
+    mode: roles
+    roles: [engineering]
+  linear:
+    mode: roles
+    roles: [engineering]
+  slack:            # by channel: the channel name is usually in the title or first line
+    mode: keyword
+    default: tenant
+    rules:
+      - {name: slack-hr, pattern: "(?i)(#|channel[: ]+)(hr|people|recruit)", roles: [hr]}
+      - {name: slack-exec, pattern: "(?i)(#|channel[: ]+)(exec|leadership|board)", roles: [exec]}
+      - {name: slack-eng, pattern: "(?i)(#|channel[: ]+)(eng|dev|infra|oncall|incident)", roles: [engineering]}
+      - {name: slack-sales, pattern: "(?i)(#|channel[: ]+)(sales|deals|gtm)", roles: [sales]}
+  confluence:       # by space
+    mode: keyword
+    default: tenant
+    rules:
+      - {name: space-hr, pattern: "(?i)\\b(hr|people ops|compensation|benefits|performance review)\\b", roles: [hr]}
+      - {name: space-exec, pattern: "(?i)\\b(board|executive|strategy|fundrais|m&a)\\b", roles: [exec]}
+      - {name: space-eng, pattern: "(?i)\\b(architecture|runbook|on-?call|postmortem|api design)\\b", roles: [engineering]}
+      - {name: space-sales, pattern: "(?i)\\b(sales playbook|pricing|quota|pipeline)\\b", roles: [sales]}
+  google_drive:     # by folder
+    mode: keyword
+    default: tenant
+    rules:
+      - {name: folder-hr, pattern: "(?i)\\b(hr|people ops|compensation|benefits|performance review)\\b", roles: [hr]}
+      - {name: folder-exec, pattern: "(?i)\\b(board|executive|strategy|fundrais|m&a)\\b", roles: [exec]}
+      - {name: folder-eng, pattern: "(?i)\\b(architecture|runbook|on-?call|postmortem|api design)\\b", roles: [engineering]}
+      - {name: folder-sales, pattern: "(?i)\\b(sales playbook|pricing|quota|pipeline)\\b", roles: [sales]}
+default:
+  mode: tenant
