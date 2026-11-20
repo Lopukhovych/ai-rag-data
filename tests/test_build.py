@@ -299,3 +299,29 @@ def test_users_cover_every_expected_gmail_document():
         acl = b.derive_acl(d, rules)
         assert any(b.is_allowed(u, acl) for u in enterprise), d["doc_id"]
     assert len(users) == 30
+
+
+def test_table_rows_ignores_long_key_value_lines():
+    content = "summary: " + "word " * 3000 + "\nowner: Eng\nstatus: open\ndate: today"
+    rows = b._table_rows(content)
+    assert all(len(r[0]) <= b.MAX_KEY_LEN for r in rows)
+    assert not b._usable_table(rows)  # a 15k-char value cannot fit on a PDF page
+
+
+def test_render_pdfs_survives_tall_table_cell(tmp_path, monkeypatch):
+    import random
+
+    monkeypatch.setattr(
+        b, "_usable_table", lambda rows: True
+    )  # force the fallback path
+
+    huge = "word " * 3000
+    doc = {
+        "doc_id": "dsid_x",
+        "source_type": "google_drive",
+        "tenant_id": "enterprise",
+        "title": "Huge cell",
+        "content": f"| a | b |\n| 1 | {huge} |\n| 2 | y |\n| 3 | z |",
+    }
+    out = b.render_pdfs([doc], tmp_path, random.Random(1))
+    assert out and (tmp_path / "dsid_x.pdf").stat().st_size > 0
