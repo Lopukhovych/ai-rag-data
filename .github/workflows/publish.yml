@@ -1,0 +1,34 @@
+name: publish
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - run: uv sync --frozen
+      - run: uv run python build.py --profile mini && uv run python build.py --profile full
+      - run: uv run python validate.py
+      - name: Tag matches dataset_version
+        run: test "v$(jq -r .dataset_version build/MANIFEST.json)" = "$GITHUB_REF_NAME"
+      - name: Publish (write-once)
+        run: |
+          BUCKET=$(aws ssm get-parameter --name /ai-rag/s3/data-bucket --query Parameter.Value --output text)
+          PREFIX=ai-rag-data/$GITHUB_REF_NAME
+          if aws s3api head-object --bucket "$BUCKET" --key "$PREFIX/MANIFEST.json" >/dev/null 2>&1; then
+            echo "$PREFIX already exists; bump dataset_version"; exit 1
+          fi
+          aws s3 sync build/mini/ "s3://$BUCKET/$PREFIX/mini/"
+          aws s3 sync build/full/ "s3://$BUCKET/$PREFIX/full/"
+          aws s3 cp build/MANIFEST.json "s3://$BUCKET/$PREFIX/MANIFEST.json"

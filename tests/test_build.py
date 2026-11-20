@@ -241,3 +241,61 @@ def test_full_profile_selects_expected_sources():
 def test_repo_rules_files_exist(profile):
     assert (Path(b.ROOT) / "rules" / "acl_rules.yaml").exists()
     assert (Path(b.ROOT) / "rules" / "subsidiary_rewrite.yaml").exists()
+
+
+def test_rewriter_keeps_external_emails_and_renames_company_domain():
+    rules = {
+        "company": ["Redwood"],
+        "company_replacement": "Northwind",
+        "domains": ["redwood.ai"],
+    }
+    out = b.Rewriter(rules)(
+        "Mail maya@redwood.ai or git@github.com about Redwood Inference."
+    )
+    assert "redwood" not in out.lower()
+    assert "git@github.com" in out
+    assert "Northwind Inference" in out
+
+
+def test_rewriter_renames_discovered_names_with_apostrophes():
+    r = b.Rewriter({"domains": ["redwood.ai"]}, extra_first_names={"Liam", "Aisha"})
+    out = r("Liam O'Conn pairs with Aisha Patel.")
+    assert "Liam" not in out and "Aisha" not in out and "Conn" not in out
+
+
+def test_discover_first_names_from_company_emails():
+    corpus = [
+        {
+            "title": "t",
+            "content": "From: maya.chen@redwood.ai\nTo: support@redwood.ai, bob@other.com",
+        },
+        {"title": "t", "content": "cc: aisha@redwood.ai"},
+    ]
+    assert b.discover_first_names(corpus, ["redwood.ai"]) == {"Maya", "Aisha"}
+
+
+def test_users_cover_every_expected_gmail_document():
+    corpus = []
+    needed = set()
+    for i in range(
+        40
+    ):  # 40 messages, each between two unique addresses: needs several users
+        corpus.append(
+            {
+                "doc_id": f"g{i}",
+                "source_type": "gmail",
+                "tenant_id": "enterprise",
+                "title": "m",
+                "content": f"From: a{i}@x.com\nTo: b{i // 2}@x.com",
+            }
+        )
+        needed.add(f"g{i}")
+    import random
+
+    users = b.build_users(corpus, random.Random(1), needed)
+    rules = b.load_acl_rules()
+    enterprise = [u for u in users if u["tenant_id"] == "enterprise"]
+    for d in corpus:
+        acl = b.derive_acl(d, rules)
+        assert any(b.is_allowed(u, acl) for u in enterprise), d["doc_id"]
+    assert len(users) == 30

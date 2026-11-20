@@ -210,6 +210,14 @@ def load_sources(path: Path = ROOT / "sources.yaml") -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()}
 
 
+HEAD_CHARS = 1500
+
+
+def header_emails(title: str, content: str, head_chars: int = HEAD_CHARS) -> set[str]:
+    """Addresses in the head of a document: who a Gmail message is visible to."""
+    return {e.lower() for e in EMAIL_RE.findall(title + "\n" + content[:head_chars])}
+
+
 # ----------------------------------------------------------------------------- permissions
 def load_acl_rules(path: Path = ROOT / "rules" / "acl_rules.yaml") -> dict:
     rules = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -233,7 +241,11 @@ def derive_acl(doc: dict, rules: dict) -> dict:
         visibility, allow_roles = "roles", list(spec["roles"])
     elif mode == "principals":
         visibility = "principals"
-        allow_emails = sorted({e.lower() for e in EMAIL_RE.findall(head)})
+        allow_emails = sorted(
+            header_emails(
+                doc["title"], doc["content"], rules.get("head_chars", HEAD_CHARS)
+            )
+        )
     elif mode == "keyword":
         for r in spec.get("rules", []):
             if r["_re"].search(head):
@@ -269,17 +281,74 @@ def is_allowed(user: dict, acl: dict) -> bool:
 
 
 # ----------------------------------------------------------------------------- tenants
-class Rewriter:
-    """Deterministic, order-independent renaming of company, products, and people."""
+GENERIC_LOCALS = {
+    "info",
+    "support",
+    "sales",
+    "admin",
+    "noreply",
+    "team",
+    "hello",
+    "oncall",
+    "git",
+    "security",
+    "billing",
+    "legal",
+    "help",
+    "contact",
+    "press",
+    "jobs",
+    "careers",
+    "ops",
+    "dev",
+    "eng",
+    "finance",
+    "marketing",
+    "product",
+    "it",
+    "hr",
+    "people",
+    "alerts",
+    "notifications",
+    "no-reply",
+    "root",
+}
 
-    def __init__(self, rules: dict, seed: int = SEED):
+
+def discover_first_names(corpus: list[dict], domains: list[str]) -> set[str]:
+    """First names of the company's people, read from its own email addresses (maya@redwood.ai)."""
+    domains = {d.lower() for d in domains}
+    names: Counter = Counter()
+    for d in corpus:
+        for email in EMAIL_RE.findall(d["title"] + "\n" + d["content"][:HEAD_CHARS]):
+            local, _, domain = email.lower().partition("@")
+            if domains and domain not in domains:
+                continue
+            first = re.split(r"[._-]", local)[0]
+            if first.isalpha() and len(first) >= 3 and first not in GENERIC_LOCALS:
+                names[first.capitalize()] += 1
+    return set(names)
+
+
+class Rewriter:
+    """Deterministic, order-independent renaming of company, products, people, and emails."""
+
+    def __init__(
+        self,
+        rules: dict,
+        seed: int = SEED,
+        extra_first_names: set[str] | frozenset = frozenset(),
+    ):
         self.seed = seed
         self.company = sorted(rules.get("company") or [], key=len, reverse=True)
         self.products = sorted(rules.get("products") or [], key=len, reverse=True)
         self.company_to = rules.get("company_replacement", "Northwind Labs")
         self.product_to = rules.get("product_replacements") or ["NorthServe"]
-        names = "|".join(FIRST_NAMES)
-        self.person_re = re.compile(rf"\b({names})\s+([A-Z][a-z]{{2,}})\b")
+        self.domains = {d.lower() for d in rules.get("domains") or []}
+        names = "|".join(
+            sorted(set(FIRST_NAMES) | set(extra_first_names), key=len, reverse=True)
+        )
+        self.person_re = re.compile(rf"\b({names})\s+([A-Z][A-Za-z']{{2,}})\b")
 
     def _pick(self, key: str, options: list[str]) -> str:
         h = int(hashlib.sha256(f"{self.seed}:{key}".encode()).hexdigest(), 16)
@@ -289,17 +358,20 @@ class Rewriter:
         full = match.group(0)
         return f"{self._pick('f:' + full, FAKE_FIRST)} {self._pick('l:' + full, FAKE_LAST)}"
 
+    def email(self, match: re.Match) -> str:
+        address = match.group(0)
+        if self.domains and address.lower().partition("@")[2] not in self.domains:
+            return address  # external addresses (git@github.com) stay
+        return f"{self._pick('e:' + address.lower(), FAKE_FIRST).lower()}@northwind.example"
+
     def __call__(self, text: str) -> str:
+        text = EMAIL_RE.sub(
+            self.email, text
+        )  # first, so company replacement cannot break domains
         for name in self.products:  # before company: product names often contain it
             text = text.replace(name, self._pick("p:" + name, self.product_to))
         for name in self.company:
             text = text.replace(name, self.company_to)
-        text = EMAIL_RE.sub(
-            lambda m: (
-                f"{self._pick('e:' + m.group(0), FAKE_FIRST).lower()}@northwind.example"
-            ),
-            text,
-        )
         return self.person_re.sub(self.person, text)
 
 
@@ -345,16 +417,42 @@ def make_subsidiary(
     return clones, sub_questions
 
 
-def build_users(corpus: list[dict], rng: random.Random) -> list[dict]:
-    """30 users. Enterprise emails come from real Gmail headers so Gmail ACLs have principals."""
-    counts = Counter()
+def build_users(
+    corpus: list[dict], rng: random.Random, needed: set[str] | frozenset = frozenset()
+) -> list[dict]:
+    """30 users. Enterprise emails come from real Gmail headers so Gmail ACLs have principals.
+
+    Addresses are chosen by greedy set cover over the Gmail documents that questions expect,
+    so every expected document has at least one user who may read it; the rest are the
+    most frequent addresses.
+    """
+    counts: Counter = Counter()
+    wanted: dict[str, set[str]] = {}
     for d in corpus:
         if d["source_type"] == "gmail" and d["tenant_id"] == "enterprise":
-            counts.update(e.lower() for e in EMAIL_RE.findall(d["content"][:1500]))
-    seen_emails = [e for e, _ in counts.most_common()]
+            emails = header_emails(d["title"], d["content"])
+            counts.update(emails)
+            if d["doc_id"] in needed and emails:
+                wanted[d["doc_id"]] = emails
+    n_enterprise = sum(USER_PLAN["enterprise"].values())
+    chosen: list[str] = []
+    uncovered = dict(wanted)
+    while uncovered and len(chosen) < n_enterprise:
+        tally: Counter = Counter()
+        for emails in uncovered.values():
+            tally.update(emails)
+        best = max(sorted(tally), key=lambda e: (tally[e], counts[e]))
+        chosen.append(best)
+        uncovered = {k: v for k, v in uncovered.items() if best not in v}
+    if uncovered:
+        print(
+            f"WARNING: {len(uncovered)} expected Gmail documents cannot be covered by {n_enterprise} users"
+        )
+    chosen += [e for e, _ in counts.most_common() if e not in chosen]
+
     users, n = [], 0
     for tenant, plan in USER_PLAN.items():
-        pool = list(seen_emails) if tenant == "enterprise" else []
+        pool = list(chosen) if tenant == "enterprise" else []
         for role, count in plan.items():
             for _ in range(count):
                 n += 1
@@ -708,13 +806,17 @@ def build(
         )
         or {}
     )
-    clones, sub_questions = make_subsidiary(corpus, questions, Rewriter(sub_rules), rng)
+    first_names = discover_first_names(corpus, sub_rules.get("domains") or [])
+    print(f"Discovered {len(first_names)} first names from company email addresses")
+    clones, sub_questions = make_subsidiary(
+        corpus, questions, Rewriter(sub_rules, extra_first_names=first_names), rng
+    )
     all_docs = corpus + clones
 
     # permissions, users, questions
     acl_rules = load_acl_rules(rules_dir / "acl_rules.yaml")
     acl = [derive_acl(d, acl_rules) for d in all_docs]
-    users = build_users(corpus, rng)
+    users = build_users(corpus, rng, needed)
     split = split_questions(questions, random.Random(SEED))
     split_by_id = {q["question_id"]: q["split"] for q in split}
     sub_split = [

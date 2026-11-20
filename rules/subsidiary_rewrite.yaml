@@ -1,7 +1,8 @@
 # Used to clone 500 Confluence/Drive documents into the `subsidiary` tenant.
-# Fill `company` and `products` after reading a few documents (the build prints the
-# most frequent capitalised names to help). People are renamed automatically.
-company: []        # e.g. ["Acme Inference", "Acme"]  (longest first)
-products: []       # e.g. ["AcmeServe"]
-company_replacement: "Northwind Labs"
+# People are renamed automatically: first names are read from the company's own email
+# addresses (see `domains`) plus a built-in list. Company and product names are listed here.
+company: ["Redwood"]          # replaced everywhere, so "Redwood Inference" becomes "Northwind Inference"
+products: []                  # product names that must NOT keep the company prefix, if any
+company_replacement: "Northwind"
 product_replacements: ["NorthServe", "NorthStack", "NorthGraph", "NorthQueue", "NorthEdge"]
+domains: ["redwood.ai"]       # only addresses in these domains are rewritten; others (git@github.com) stay
